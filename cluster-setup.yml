@@ -1,0 +1,160 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - name: Remove swapfile from /etc/fstab
+    mount:
+      name: "{{ item }}"
+      fstype: swap
+      state: absent
+    with_items:
+      - swap
+      - none
+
+  - name: Disable swap
+    command: swapoff -a
+    when: ansible_swaptotal_mb > 0
+
+  - name: Add ports to firewall on master node
+    when: inventory_hostname in groups['k8s-master']
+    ansible.builtin.shell: "for port in 6443/tcp 2379-2380/tcp 10250/tcp 10251/tcp 10259/tcp 10257/tcp 179/tcp 4789/udp; do firewall-cmd --permanent --add-port=$port; done"
+
+  - name: Add ports to firewall on workers nodes
+    when: inventory_hostname in groups['k8s-worker']
+    ansible.builtin.shell: for port in 179/tcp 10250/tcp 30000-32767/tcp 4789/udp; do firewall-cmd --permanent --add-port=$port; done
+
+  - name: Reload firewall config  
+    command: firewall-cmd --reload
+
+  - name: Disable SELinux
+    command: setenforce 0
+
+  - name: change SELinux mode to permissive
+    command: sudo sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=permissive/g' /etc/sysconfig/selinux
+
+  - name: Install dependencies for Docker
+    yum:
+      name: yum-utils
+      state: present
+
+  - name: Add Docker repository
+    command: yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+
+  - name: Install Docker
+    yum: 
+      name: "{{ packages }}"
+      state: present
+    vars:
+      packages:
+      - docker-ce
+      - docker-ce-cli 
+      - containerd.io
+    
+  - name: Start & enable Docker service
+    ansible.builtin.service:
+      name: docker
+      state: started
+      enabled: yes
+
+  - name: Change cgroup Driver
+    ansible.builtin.copy:
+      src: ./config/docker-cgroup.json
+      dest: /etc/docker/daemon.json
+
+  - name: Restart Docker
+    service:
+      name: docker
+      daemon_reload: yes
+      state: restarted
+
+  - name: Find latest release version of cri-dockerd
+    uri:
+      url: "https://api.github.com/repos/Mirantis/cri-dockerd/releases/latest"
+      return_content: yes
+      status_code: 200
+    register: latest_release
+
+  - name: Download CRI-Docker
+    ansible.builtin.unarchive:
+      src: "https://github.com/Mirantis/cri-dockerd/releases/download/{{ latest_release.json.tag_name }}/cri-dockerd-{{ latest_release.json.tag_name | regex_replace('^v', '') }}.amd64.tgz"
+      dest: /tmp/
+      remote_src: yes
+
+  - name: Move CRI-Docker 
+    ansible.builtin.shell: cp /tmp/cri-dockerd/cri-dockerd /usr/bin/cri-dockerd
+
+  - name: Download cri-docker.service
+    ansible.builtin.get_url:
+      url: https://raw.githubusercontent.com/Mirantis/cri-dockerd/master/packaging/systemd/cri-docker.service
+      dest: /etc/systemd/system/cri-docker.service
+
+  - name: Download cri-docker.socket
+    ansible.builtin.get_url:
+      url: https://raw.githubusercontent.com/Mirantis/cri-dockerd/master/packaging/systemd/cri-docker.socket
+      dest: /etc/systemd/system/cri-docker.socket
+
+  - name: Reload daemon and enable cri-docker
+    ansible.builtin.shell: systemctl daemon-reload ; systemctl enable cri-docker.service ; systemctl enable --now cri-docker.socket
+
+  - name: Add YUM repository for Kubernetes
+    ansible.builtin.copy:
+      src: config/kubernetes.repo
+      dest: /etc/yum.repos.d/kubernetes.repo
+
+  - name: Install Kubernetes
+    yum: 
+      name: "{{ packages }}"
+      state: present
+      update_cache: yes
+    vars:
+      packages:
+        - kubelet 
+        - kubeadm 
+        - kubectl
+
+  - name: Start & enable kubelet service
+    ansible.builtin.service:
+      name: kubelet
+      state: started
+      enabled: yes
+
+  - name: Restart kubelet
+    service:
+      name: kubelet
+      daemon_reload: yes
+      state: restarted
+
+  - name: Initialize the Kubernetes cluster using kubeadm command
+    when: inventory_hostname in groups['k8s-master']
+    ansible.builtin.shell: kubeadm init --cri-socket /run/cri-dockerd.sock --pod-network-cidr=10.244.0.0/16
+
+  - name: Set up Kubernetes for user
+    command: "{{ item }}"
+    when: inventory_hostname in groups['k8s-master']
+    with_items:
+    - mkdir -p /root/.kube
+    - cp -i /etc/kubernetes/admin.conf /root/.kube/config
+    - chown root:root /root/.kube/config
+
+  - name: Install Flannel pod network
+    become: false
+    when: inventory_hostname in groups['k8s-master']
+    ansible.builtin.shell: kubectl apply -f https://github.com/coreos/flannel/raw/master/Documentation/kube-flannel.yml
+
+  - name: Retrieve Kubernetes join command that is used to join worker node(s)
+    become: false
+    when: inventory_hostname in groups['k8s-master']
+    ansible.builtin.shell: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Attach kubeadm join command to a file on Ansible control node
+    when: inventory_hostname in groups['k8s-master']
+    local_action: "copy content='{{ join_command.stdout_lines[0] }}' dest=join-command"
+
+  - name: Copy the join-command file created above to worker node
+    when: inventory_hostname in groups['k8s-worker']
+    copy: src=join-command dest=/tmp/kubeadm-join.sh mode=0777
+
+  - name: Join the worker node to cluster
+    when: inventory_hostname in groups['k8s-worker']
+    ansible.builtin.shell: sh /tmp/kubeadm-join.sh
