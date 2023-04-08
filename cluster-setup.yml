@@ -142,19 +142,11 @@
     ansible.builtin.shell: kubectl apply -f https://github.com/coreos/flannel/raw/master/Documentation/kube-flannel.yml
 
   - name: Retrieve Kubernetes join command that is used to join worker node(s)
-    become: false
+    become: true
     when: inventory_hostname in groups['k8s-master']
     ansible.builtin.shell: kubeadm token create --print-join-command
     register: join_command
 
-  - name: Attach kubeadm join command to a file on Ansible control node
-    when: inventory_hostname in groups['k8s-master']
-    local_action: "copy content='{{ join_command.stdout_lines[0] }}' dest=join-command"
-
-  - name: Copy the join-command file created above to worker node
-    when: inventory_hostname in groups['k8s-worker']
-    copy: src=join-command dest=/tmp/kubeadm-join.sh mode=0777
-
   - name: Join the worker node to cluster
     when: inventory_hostname in groups['k8s-worker']
-    ansible.builtin.shell: sh /tmp/kubeadm-join.sh
+    ansible.builtin.shell: "{{ hostvars[groups['k8s-master'] | last].join_command.stdout }} --cri-socket /run/cri-dockerd.sock" 
