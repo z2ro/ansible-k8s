@@ -142,7 +142,7 @@
     ansible.builtin.shell: kubectl apply -f https://github.com/coreos/flannel/raw/master/Documentation/kube-flannel.yml
 
   - name: Retrieve Kubernetes join command that is used to join worker node(s)
-    become: true
+    become: false
     when: inventory_hostname in groups['k8s-master']
     ansible.builtin.shell: kubeadm token create --print-join-command
     register: join_command
