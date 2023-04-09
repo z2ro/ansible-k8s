@@ -1,0 +1,7 @@
+[k8s-master]
+master-node-01 ansible_host=<REPLACE> ansible_user=<REPLACE>
+
+[k8s-worker]
+worker-node-01 ansible_host=<REPLACE> ansible_user=<REPLACE> 
+worker-node-02 ansible_host=<REPLACE> ansible_user=<REPLACE> 
+
