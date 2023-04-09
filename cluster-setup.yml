@@ -30,7 +30,7 @@
     command: setenforce 0
 
   - name: change SELinux mode to permissive
-    command: sudo sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=permissive/g' /etc/sysconfig/selinux
+    command: sed -i --follow-symlinks 's/SELINUX=enforcing/SELINUX=permissive/g' /etc/sysconfig/selinux
 
   - name: Install dependencies for Docker
     yum:
